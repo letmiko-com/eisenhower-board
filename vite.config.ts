@@ -27,13 +27,9 @@ export default defineConfig({
     globals: true,
     environment: 'jsdom',
     pool: 'forks',
-    poolOptions: {
-      forks: {
-        execArgv: ['--no-warnings'],
-      },
-    },
+    execArgv: ['--no-warnings'],
     setupFiles: ['./src/test/setup.ts'],
-    include: ['src/**/*.{test,spec}.{ts,tsx}', 'server/**/*.{test,spec}.{ts,tsx}'],
+    include: ['src/**/*.{test,spec}.{ts,tsx}'],
     coverage: {
       reporter: ['text', 'json', 'html'],
       exclude: [

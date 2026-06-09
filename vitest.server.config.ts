@@ -6,10 +6,6 @@ export default defineConfig({
     environment: 'node',
     include: ['server/**/*.test.ts'],
     pool: 'forks',
-    poolOptions: {
-      forks: {
-        execArgv: ['--no-warnings'],
-      },
-    },
+    execArgv: ['--no-warnings'],
   },
 });
