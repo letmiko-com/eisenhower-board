@@ -36,7 +36,7 @@ import db, {
   createEmailChangeRequest,
   consumeEmailChange,
 } from './db.js';
-import { sendMagicLinkEmail, sendEmailChangeVerification, isMailerConfigured } from './mailer.js';
+import { sendMagicLinkEmail, sendEmailChangeVerification, sendEmailChangedNotice, isMailerConfigured } from './mailer.js';
 import { sanitizeText } from '../shared/sanitize.js';
 import {
   CreateTaskRequestSchema,
@@ -45,11 +45,12 @@ import {
   UserIdSchema,
   MagicLinkRequestSchema,
   ChangeEmailRequestSchema,
+  SessionIdSchema,
   TaskBatchRequestSchema,
   ArchivedTasksQuerySchema,
 } from '../shared/validation.js';
 
-const app = express();
+export const app = express();
 
 if (process.env.SENTRY_DSN) {
   Sentry.init({
@@ -352,6 +353,15 @@ function authenticateSession(req: Request, res: Response, next: NextFunction): v
 
   const refreshedExpiry = now + SESSION_TTL_MS;
   touchSession(session.sessionId, now, refreshedExpiry);
+  // Re-issue the session cookie so its maxAge follows the sliding server-side
+  // expiry, capped by the absolute session lifetime
+  res.cookie(SESSION_COOKIE_NAME, rawSessionToken, {
+    httpOnly: true,
+    secure: isProduction,
+    sameSite: 'lax',
+    path: '/',
+    maxAge: Math.min(SESSION_TTL_MS, session.createdAt + SESSION_ABSOLUTE_TTL_MS - now),
+  });
   req.auth = {
     sessionId: session.sessionId,
     userId: session.userId,
@@ -390,7 +400,50 @@ function validateCsrf(req: Request, res: Response, next: NextFunction): void {
       hasCookie: Boolean(csrfCookie),
       userId: req.auth?.userId ?? null,
     });
-    res.status(403).json({ error: 'Invalid or missing CSRF token' });
+    res.status(403).json({ error: 'Invalid or missing CSRF token', code: 'CSRF' });
+    return;
+  }
+
+  next();
+}
+
+// Validate that browser-issued requests come from the configured app origin.
+// Applied to magic-link consumption routes, which cannot carry a CSRF token.
+function requireTrustedOrigin(req: Request, res: Response, next: NextFunction): void {
+  const baseUrl = process.env.APP_BASE_URL?.trim();
+  if (!baseUrl) {
+    next();
+    return;
+  }
+
+  let expectedOrigin: string;
+  try {
+    expectedOrigin = new URL(baseUrl).origin;
+  } catch {
+    next();
+    return;
+  }
+
+  const originHeader = req.get('origin');
+  const refererHeader = req.get('referer');
+  let requestOrigin: string | null = null;
+  if (originHeader) {
+    requestOrigin = originHeader;
+  } else if (refererHeader) {
+    try {
+      requestOrigin = new URL(refererHeader).origin;
+    } catch {
+      requestOrigin = null;
+    }
+  }
+
+  if (requestOrigin !== expectedOrigin) {
+    logSecurityEvent('origin_validation_failed', {
+      ip: req.ip ?? null,
+      path: req.originalUrl,
+      origin: requestOrigin,
+    });
+    res.status(403).json({ error: 'Invalid request origin' });
     return;
   }
 
@@ -421,7 +474,14 @@ app.use((_req: Request, res: Response, next: NextFunction) => {
 });
 
 // Middleware
-app.use(express.json({ limit: '10kb' }));
+// The batch route accepts up to 100 operations, which can exceed the global
+// 10kb JSON limit, so it gets a dedicated parser with a higher limit.
+const jsonParser = express.json({ limit: '10kb' });
+const batchJsonParser = express.json({ limit: '64kb' });
+app.use((req: Request, res: Response, next: NextFunction) => {
+  const parser = req.path === '/api/tasks/batch' ? batchJsonParser : jsonParser;
+  parser(req, res, next);
+});
 app.use(express.urlencoded({ extended: false, limit: '10kb' }));
 app.use('/api', (_req: Request, res: Response, next: NextFunction) => {
   res.set('Cache-Control', 'no-store');
@@ -467,6 +527,11 @@ const magicLinkEmailLimiter = createRateLimiter('magic_link_email', 3, 60 * 1000
   const email = typeof req.body?.email === 'string' ? normalizeEmail(req.body.email) : '';
   return `${ip}:${email || 'unknown'}`;
 });
+// Keyed on the email alone: blocks distributed attempts that rotate IPs
+const magicLinkEmailOnlyLimiter = createRateLimiter('magic_link_email_only', 5, 60 * 60 * 1000, (req) => {
+  const email = typeof req.body?.email === 'string' ? normalizeEmail(req.body.email) : '';
+  return email ? `email:${email}` : ipKeyGenerator(req.ip ?? '');
+});
 const verifyLimiter = createRateLimiter('verify', 10);
 const adminReadLimiter = createRateLimiter('admin_read', 30);
 const adminMutationLimiter = createRateLimiter('admin_mutation', 10);
@@ -487,7 +552,7 @@ app.get('/api/health', readLimiter, (_req: Request, res: Response) => {
   res.json({ status: 'ok' });
 });
 
-app.post('/api/auth/magic-link', magicLinkIpLimiter, magicLinkEmailLimiter, async (req: Request, res: Response) => {
+app.post('/api/auth/magic-link', magicLinkIpLimiter, magicLinkEmailLimiter, magicLinkEmailOnlyLimiter, async (req: Request, res: Response) => {
   const genericResponse = { success: true };
 
   try {
@@ -603,7 +668,7 @@ app.get('/api/auth/verify', verifyLimiter, (req: Request, res: Response) => {
   }
 });
 
-app.post('/api/auth/verify/consume', verifyLimiter, (req: Request, res: Response) => {
+app.post('/api/auth/verify/consume', verifyLimiter, requireTrustedOrigin, (req: Request, res: Response) => {
   try {
     const token = typeof req.body?.token === 'string' ? req.body.token : '';
     if (!token) {
@@ -695,7 +760,12 @@ app.get('/api/auth/sessions', readLimiter, requireAuth, (req: Request, res: Resp
 
 app.delete('/api/auth/sessions/:id', mutationLimiter, requireAuth, validateCsrf, (req: Request, res: Response) => {
   try {
-    const sessionId = req.params.id as string;
+    const idResult = SessionIdSchema.safeParse(req.params.id);
+    if (!idResult.success) {
+      res.status(400).json({ error: 'Invalid session ID' });
+      return;
+    }
+    const sessionId = idResult.data;
     if (sessionId === req.auth!.sessionId) {
       res.status(400).json({ error: 'Cannot revoke current session, use logout instead' });
       return;
@@ -1010,16 +1080,6 @@ app.post('/api/archived-tasks/:id/restore', mutationLimiter, requireAuth, valida
   }
 });
 
-app.use((err: unknown, req: Request, res: Response, _next: NextFunction) => {
-  Sentry.captureException(err);
-  console.error('Unhandled server error:', err);
-  if (req.path.startsWith('/api/')) {
-    res.status(500).json({ error: 'Internal server error' });
-    return;
-  }
-  res.status(500).send('Internal server error');
-});
-
 // --- Admin routes ---
 
 app.get('/api/admin/users', adminReadLimiter, requireAuth, requireAdmin, (req: Request, res: Response) => {
@@ -1213,7 +1273,7 @@ app.get('/api/account/verify-email', verifyLimiter, (req: Request, res: Response
   }
 });
 
-app.post('/api/account/verify-email/consume', express.urlencoded({ extended: false }), verifyLimiter, (req: Request, res: Response) => {
+app.post('/api/account/verify-email/consume', verifyLimiter, requireTrustedOrigin, (req: Request, res: Response) => {
   try {
     const token = typeof req.body?.token === 'string' ? req.body.token : '';
     if (!token) {
@@ -1230,8 +1290,14 @@ app.post('/api/account/verify-email/consume', express.urlencoded({ extended: fal
 
     logSecurityEvent('email_changed', {
       userId: result.userId,
-      newEmail: result.newEmail,
-      ip: req.ip ?? null,
+    });
+
+    // Notify the previous address; a failed notification must not block the change
+    sendEmailChangedNotice({
+      to: result.oldEmail,
+      language: getPreferredLanguage(req.get('accept-language')),
+    }).catch((noticeErr) => {
+      console.error('Failed to send email change notice:', noticeErr);
     });
 
     res.redirect('/?email-changed=true');
@@ -1251,21 +1317,35 @@ app.get('/{*splat}', (_req: Request, res: Response) => {
   res.sendFile(path.join(distPath, 'index.html'));
 });
 
-const server = app.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${PORT}`);
+// Error handler: registered after all routes so it catches errors from any of them
+app.use((err: unknown, req: Request, res: Response, _next: NextFunction) => {
+  Sentry.captureException(err);
+  console.error('Unhandled server error:', err);
+  if (req.path.startsWith('/api/')) {
+    res.status(500).json({ error: 'Internal server error' });
+    return;
+  }
+  res.status(500).send('Internal server error');
 });
 
-function gracefulShutdown(signal: string) {
-  console.log(`${signal} received, shutting down...`);
-  server.close(() => {
-    db.close();
-    process.exit(0);
+// In tests the app is exercised through supertest without binding a port
+if (process.env.NODE_ENV !== 'test') {
+  const server = app.listen(PORT, () => {
+    console.log(`Server running on http://localhost:${PORT}`);
   });
-  setTimeout(() => {
-    db.close();
-    process.exit(1);
-  }, 5000).unref();
-}
 
-process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
-process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+  const gracefulShutdown = (signal: string) => {
+    console.log(`${signal} received, shutting down...`);
+    server.close(() => {
+      db.close();
+      process.exit(0);
+    });
+    setTimeout(() => {
+      db.close();
+      process.exit(1);
+    }, 5000).unref();
+  };
+
+  process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+  process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+}

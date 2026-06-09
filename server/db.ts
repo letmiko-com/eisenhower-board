@@ -589,6 +589,7 @@ export interface CreateEmailChangeParams {
 
 export interface ConsumedEmailChange {
   userId: string;
+  oldEmail: string;
   newEmail: string;
 }
 
@@ -615,10 +616,13 @@ const consumeEmailChangeTx = db.transaction((tokenHash: string, now: number): Co
   const existing = stmts.getUserByEmail.get(row.new_email) as DbUser | undefined;
   if (existing && existing.id !== row.user_id) return null;
 
+  const currentUser = stmts.getUserById.get(row.user_id) as DbUser | undefined;
+  if (!currentUser) return null;
+
   stmts.updateUserEmail.run(row.new_email, row.user_id);
   stmts.deleteEmailChangesByUser.run(row.user_id);
 
-  return { userId: row.user_id, newEmail: row.new_email };
+  return { userId: row.user_id, oldEmail: currentUser.email, newEmail: row.new_email };
 });
 
 export function consumeEmailChange(tokenHash: string, now: number): ConsumedEmailChange | null {
@@ -677,8 +681,10 @@ function buildArchivedFilters(filters: ArchivedTasksFilters): {
   const params: (string | number)[] = [];
 
   if (filters.q) {
-    conditions.push('text LIKE ?');
-    params.push(`%${filters.q}%`);
+    // Escape LIKE wildcards so user input is matched literally
+    const escaped = filters.q.replace(/[\\%_]/g, '\\$&');
+    conditions.push("text LIKE ? ESCAPE '\\'");
+    params.push(`%${escaped}%`);
   }
   if (filters.quadrant) {
     conditions.push('quadrant = ?');

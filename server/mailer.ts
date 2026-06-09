@@ -228,6 +228,68 @@ const EMAIL_CHANGE_COPY: Record<SupportedLanguage, EmailCopyEntry> = {
   },
 };
 
+const EMAIL_CHANGED_NOTICE_COPY: Record<SupportedLanguage, {
+  subject: string;
+  body: string;
+}> = {
+  en: {
+    subject: 'Your email address was changed',
+    body: `The email address of your ${APP_NAME} account has just been changed. If you did not request this change, please contact support immediately.`,
+  },
+  fr: {
+    subject: 'Votre adresse email a été modifiée',
+    body: `L’adresse email de votre compte ${APP_NAME} vient d’être modifiée. Si vous n’êtes pas à l’origine de ce changement, contactez immédiatement le support.`,
+  },
+  de: {
+    subject: 'Ihre E-Mail-Adresse wurde geändert',
+    body: `Die E-Mail-Adresse Ihres ${APP_NAME}-Kontos wurde soeben geändert. Wenn Sie diese Änderung nicht angefordert haben, kontaktieren Sie bitte umgehend den Support.`,
+  },
+  es: {
+    subject: 'Tu dirección de correo ha sido cambiada',
+    body: `La dirección de correo de tu cuenta de ${APP_NAME} acaba de ser cambiada. Si no has solicitado este cambio, contacta con el soporte inmediatamente.`,
+  },
+  it: {
+    subject: 'Il tuo indirizzo email è stato modificato',
+    body: `L'indirizzo email del tuo account ${APP_NAME} è appena stato modificato. Se non hai richiesto questa modifica, contatta subito il supporto.`,
+  },
+  pt: {
+    subject: 'Seu endereço de email foi alterado',
+    body: `O endereço de email da sua conta ${APP_NAME} acabou de ser alterado. Se você não solicitou esta alteração, contate o suporte imediatamente.`,
+  },
+  nl: {
+    subject: 'Uw e-mailadres is gewijzigd',
+    body: `Het e-mailadres van uw ${APP_NAME}-account is zojuist gewijzigd. Als u deze wijziging niet heeft aangevraagd, neem dan onmiddellijk contact op met de support.`,
+  },
+  pl: {
+    subject: 'Twój adres e-mail został zmieniony',
+    body: `Adres e-mail Twojego konta ${APP_NAME} został właśnie zmieniony. Jeśli nie prosiłeś o tę zmianę, natychmiast skontaktuj się z pomocą techniczną.`,
+  },
+  ru: {
+    subject: 'Ваш адрес электронной почты был изменён',
+    body: `Адрес электронной почты вашей учётной записи ${APP_NAME} только что был изменён. Если вы не запрашивали это изменение, немедленно свяжитесь со службой поддержки.`,
+  },
+  uk: {
+    subject: 'Вашу адресу електронної пошти було змінено',
+    body: `Адресу електронної пошти вашого облікового запису ${APP_NAME} щойно було змінено. Якщо ви не запитували цю зміну, негайно зверніться до служби підтримки.`,
+  },
+  zh: {
+    subject: '您的电子邮件地址已被更改',
+    body: `您的 ${APP_NAME} 账户的电子邮件地址刚刚被更改。如果您没有请求此更改，请立即联系支持团队。`,
+  },
+  hi: {
+    subject: 'आपका ईमेल पता बदल दिया गया है',
+    body: `आपके ${APP_NAME} खाते का ईमेल पता अभी बदला गया है। यदि आपने यह परिवर्तन नहीं किया है, तो कृपया तुरंत सहायता टीम से संपर्क करें।`,
+  },
+  ar: {
+    subject: 'تم تغيير عنوان بريدك الإلكتروني',
+    body: `تم للتو تغيير عنوان البريد الإلكتروني لحسابك في ${APP_NAME}. إذا لم تطلب هذا التغيير، يرجى التواصل مع الدعم فورًا.`,
+  },
+  bn: {
+    subject: 'আপনার ইমেল ঠিকানা পরিবর্তন করা হয়েছে',
+    body: `আপনার ${APP_NAME} অ্যাকাউন্টের ইমেল ঠিকানা এইমাত্র পরিবর্তন করা হয়েছে। আপনি এই পরিবর্তনের অনুরোধ না করলে, অবিলম্বে সাপোর্টের সাথে যোগাযোগ করুন।`,
+  },
+};
+
 function resolveLanguage(lang?: string): SupportedLanguage {
   if (!lang) return 'en';
   const base = lang.toLowerCase().split('-')[0];
@@ -387,6 +449,24 @@ export interface SendEmailChangeParams {
   link: string;
   expiresInMinutes: number;
   language?: string;
+}
+
+export interface SendEmailChangedNoticeParams {
+  to: string;
+  language?: string;
+}
+
+// Notify the previous address after an email change has been confirmed
+export async function sendEmailChangedNotice(params: SendEmailChangedNoticeParams): Promise<void> {
+  const lang = resolveLanguage(params.language);
+  const copy = EMAIL_CHANGED_NOTICE_COPY[lang];
+
+  await sendEmail({
+    to: params.to,
+    subject: copy.subject,
+    text: copy.body,
+    html: `<p>${escapeHtml(copy.body)}</p>`,
+  });
 }
 
 export async function sendEmailChangeVerification(params: SendEmailChangeParams): Promise<void> {

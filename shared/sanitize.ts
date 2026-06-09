@@ -1,11 +1,19 @@
 const MAX_TEXT_LENGTH = 500;
 
 /**
- * Sanitize text input by removing HTML tags and trimming whitespace
+ * Sanitize text input by removing HTML tags, Unicode control/format
+ * characters and trimming whitespace
  */
 export function sanitizeText(input: string): string {
   // Remove HTML tags
   let sanitized = input.replace(/<[^>]*>/g, '');
+
+  // Remove a trailing unclosed tag (a remaining "<" never followed by ">")
+  sanitized = sanitized.replace(/<[^>]*$/, '');
+
+  // Strip Unicode control (Cc) and format (Cf) characters, keeping
+  // tab/newline-style whitespace (U+0009 to U+000D) for normalization below
+  sanitized = sanitized.replace(/[\u0000-\u0008\u000E-\u001F\u007F-\u009F\p{Cf}]/gu, '');
 
   // Trim whitespace and normalize multiple spaces
   sanitized = sanitized.trim().replace(/\s+/g, ' ');

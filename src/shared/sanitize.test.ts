@@ -44,6 +44,33 @@ describe('sanitizeText', () => {
   it('handles nested HTML tags', () => {
     expect(sanitizeText('<div><span>text</span></div>')).toBe('text');
   });
+
+  it('removes a trailing unclosed HTML tag', () => {
+    expect(sanitizeText('hello <scr')).toBe('hello');
+    expect(sanitizeText('hello <')).toBe('hello');
+    expect(sanitizeText('<b>bold</b> trailing <i')).toBe('bold trailing');
+    expect(sanitizeText('<')).toBe('');
+  });
+
+  it('strips Unicode control characters (Cc)', () => {
+    expect(sanitizeText('he\u0000llo')).toBe('hello');
+    expect(sanitizeText('bell\u0007 sound')).toBe('bell sound');
+    expect(sanitizeText('del\u007Fete')).toBe('delete');
+    expect(sanitizeText('esc\u001Bape')).toBe('escape');
+  });
+
+  it('strips Unicode format characters (Cf)', () => {
+    expect(sanitizeText('zero\u200Bwidth')).toBe('zerowidth');
+    expect(sanitizeText('rtl\u202Eoverride')).toBe('rtloverride');
+    expect(sanitizeText('bom\uFEFFmarker')).toBe('bommarker');
+    expect(sanitizeText('soft\u00ADhyphen')).toBe('softhyphen');
+  });
+
+  it('keeps useful whitespace when stripping control characters', () => {
+    expect(sanitizeText('tab\there')).toBe('tab here');
+    expect(sanitizeText('line\nbreak')).toBe('line break');
+    expect(sanitizeText('carriage\rreturn')).toBe('carriage return');
+  });
 });
 
 describe('isValidTaskText', () => {

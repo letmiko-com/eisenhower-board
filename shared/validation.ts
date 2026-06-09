@@ -42,6 +42,8 @@ export const TaskIdSchema = z.string().uuid('Invalid task ID');
 
 export const UserIdSchema = z.string().uuid('Invalid user ID');
 
+export const SessionIdSchema = z.string().uuid('Invalid session ID');
+
 export const ChangeEmailRequestSchema = z.object({
   email: z.string().trim().toLowerCase().email('Invalid email'),
   language: z.string().min(2).max(5).optional(),
