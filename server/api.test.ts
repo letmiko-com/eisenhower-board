@@ -233,6 +233,15 @@ describe('API: origin check on consume routes', () => {
     expect(res.headers.location).toBe('/');
   });
 
+  it('serves the confirm page with Referrer-Policy: origin so the consume POST keeps a Referer', async () => {
+    const token = tokenFromLink(await requestMagicLink('referrer-policy@example.com'));
+    const res = await request(app)
+      .get(`/api/auth/verify?token=${encodeURIComponent(token)}`)
+      .set('X-Forwarded-For', nextIp());
+    expect(res.status).toBe(200);
+    expect(res.headers['referrer-policy']).toBe('origin');
+  });
+
   it('rejects email-change consumption from a foreign origin', async () => {
     const res = await request(app)
       .post('/api/account/verify-email/consume')

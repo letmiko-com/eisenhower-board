@@ -612,6 +612,11 @@ app.get('/api/auth/verify', verifyLimiter, (req: Request, res: Response) => {
     const dir = language === 'ar' ? 'rtl' : 'ltr';
 
     res.setHeader('Cache-Control', 'no-store');
+    // Helmet sets Referrer-Policy: no-referrer globally, and some browsers
+    // (e.g. Firefox) omit the Origin header on same-origin form POSTs. That
+    // leaves requireTrustedOrigin on /consume with nothing to validate. Emit
+    // the origin (without the token) so the consume POST carries a Referer.
+    res.setHeader('Referrer-Policy', 'origin');
     res.type('html').send(`<!doctype html>
 <html lang="${language}" dir="${dir}">
   <head>
@@ -1217,6 +1222,9 @@ app.get('/api/account/verify-email', verifyLimiter, (req: Request, res: Response
     const dir = language === 'ar' ? 'rtl' : 'ltr';
 
     res.setHeader('Cache-Control', 'no-store');
+    // See /api/auth/verify: re-enable a Referer for the consume POST so
+    // requireTrustedOrigin can validate it even when Origin is absent.
+    res.setHeader('Referrer-Policy', 'origin');
     res.type('html').send(`<!doctype html>
 <html lang="${language}" dir="${dir}">
   <head>
