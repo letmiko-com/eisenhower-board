@@ -46,12 +46,12 @@ jobs:
           cp -r dist release/
           cp -r dist-server release/
           cp package.json package-lock.json release/
-          cd release && zip -r ../eisenhower-board-${{ github.ref_name }}.zip .
+          cd release && zip -r "../eisenhower-board-${GITHUB_REF_NAME}.zip" .
 
       - name: Generate changelog
         id: changelog
         run: |
-          VERSION=${{ github.ref_name }}
+          VERSION="$GITHUB_REF_NAME"
           echo "## $VERSION" > CHANGELOG.md
           echo "" >> CHANGELOG.md
           
@@ -194,12 +194,16 @@ jobs:
 
       - name: Create manifest list and push
         working-directory: /tmp/digests
+        env:
+          VERSION: ${{ steps.version.outputs.VERSION }}
         run: |
           docker buildx imagetools create \
-            -t ghcr.io/${{ steps.image.outputs.IMAGE_NAME }}:${{ steps.version.outputs.VERSION }} \
+            -t "ghcr.io/${{ steps.image.outputs.IMAGE_NAME }}:${VERSION}" \
             -t ghcr.io/${{ steps.image.outputs.IMAGE_NAME }}:latest \
             $(printf 'ghcr.io/${{ steps.image.outputs.IMAGE_NAME }}@sha256:%s ' *)
 
       - name: Inspect image
+        env:
+          VERSION: ${{ steps.version.outputs.VERSION }}
         run: |
-          docker buildx imagetools inspect ghcr.io/${{ steps.image.outputs.IMAGE_NAME }}:${{ steps.version.outputs.VERSION }}
+          docker buildx imagetools inspect "ghcr.io/${{ steps.image.outputs.IMAGE_NAME }}:${VERSION}"
