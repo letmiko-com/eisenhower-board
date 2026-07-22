@@ -510,7 +510,9 @@ function createRateLimiter(
       logSecurityEvent('rate_limit_exceeded', {
         limiter: name,
         ip: req.ip ?? null,
-        path: req.originalUrl,
+        // Log path only (no query string) so token-bearing verify routes
+        // never leak the raw magic-link / email-change token into logs.
+        path: req.path,
         userId: req.auth?.userId ?? null,
       });
       res.status(429).json({ error: 'Too many requests, please try again later' });
