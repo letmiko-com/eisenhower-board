@@ -1,0 +1,19 @@
+# Continuous replication of the production SQLite database to an S3-compatible
+# bucket (Cloudflare R2). Environment variables are expanded by Litestream at
+# startup; the entrypoint only runs Litestream when LITESTREAM_BUCKET is set.
+# Runbook: docs/backup.md
+dbs:
+  - path: ${DATA_DIR}/tasks.db
+    replicas:
+      - type: s3
+        bucket: ${LITESTREAM_BUCKET}
+        path: tasks.db
+        endpoint: ${LITESTREAM_ENDPOINT}
+        region: auto
+        access-key-id: ${LITESTREAM_ACCESS_KEY_ID}
+        secret-access-key: ${LITESTREAM_SECRET_ACCESS_KEY}
+        # R2 requires path-style addressing
+        force-path-style: true
+        # Keep 10 days of point-in-time history, one snapshot per day
+        retention: 240h
+        snapshot-interval: 24h

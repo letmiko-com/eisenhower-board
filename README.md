@@ -65,6 +65,8 @@ Email provider (one of):
 
 Data is stored in a SQLite database inside a Docker volume and persists between restarts.
 
+Optional continuous backup to an S3-compatible bucket (Cloudflare R2) via Litestream: set the `LITESTREAM_*` variables described in [docs/backup.md](docs/backup.md). Without them the container runs exactly as before.
+
 ## Development
 
 ```bash

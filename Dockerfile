@@ -17,6 +17,9 @@ ENV APP_VERSION=${APP_VERSION}
 RUN npm run build
 RUN npm run build:server
 
+# Litestream binary for continuous SQLite replication (multi-arch manifest)
+FROM litestream/litestream:0.3.13@sha256:027eda2a89a86015b9797d2129d4dd447e8953097b4190e1d5a30b73e76d8d58 AS litestream
+
 # Production
 FROM node:22-alpine@sha256:968df39aedcea65eeb078fb336ed7191baf48f972b4479711397108be0966920
 WORKDIR /app
@@ -43,6 +46,13 @@ RUN mkdir -p /app/data && chown -R node:node /app/data
 # Copy entrypoint script
 COPY docker/entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+# Litestream: binary and config; replication only activates when
+# LITESTREAM_BUCKET is set (see docker/entrypoint.sh and docs/backup.md)
+COPY --from=litestream /usr/local/bin/litestream /usr/local/bin/litestream
+# COPY preserves the source file mode; force world-readable so the 'node'
+# user can load the config after privileges are dropped
+COPY --chmod=644 docker/litestream.yml /etc/litestream.yml
 
 # Environment variables
 ENV NODE_ENV=production
