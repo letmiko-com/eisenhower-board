@@ -104,10 +104,22 @@ export function initializeSchema(): void {
       text TEXT NOT NULL,
       quadrant TEXT NOT NULL,
       created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL DEFAULT 0,
+      due_at INTEGER,
       completed_at INTEGER,
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     );
   `);
+
+  // Additive migration for databases created before due dates existed.
+  // ALTER ADD requires a constant default; rows then get backfilled below.
+  if (!tableHasColumns('tasks', ['updated_at'])) {
+    db.exec('ALTER TABLE tasks ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0');
+  }
+  if (!tableHasColumns('tasks', ['due_at'])) {
+    db.exec('ALTER TABLE tasks ADD COLUMN due_at INTEGER');
+  }
+  db.exec('UPDATE tasks SET updated_at = created_at WHERE updated_at = 0');
 
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_tasks_user_active ON tasks(user_id, completed_at, created_at);
@@ -152,29 +164,32 @@ initializeSchema();
 const stmts = {
   // Tasks
   getAllActive: db.prepare(
-    'SELECT id, text, quadrant, created_at FROM tasks WHERE user_id = ? AND completed_at IS NULL ORDER BY created_at ASC'
+    'SELECT id, text, quadrant, created_at, updated_at, due_at FROM tasks WHERE user_id = ? AND completed_at IS NULL ORDER BY created_at ASC'
   ),
   getArchived: db.prepare(
-    'SELECT id, text, quadrant, created_at, completed_at FROM tasks WHERE user_id = ? AND completed_at IS NOT NULL ORDER BY completed_at DESC'
+    'SELECT id, text, quadrant, created_at, updated_at, due_at, completed_at FROM tasks WHERE user_id = ? AND completed_at IS NOT NULL ORDER BY completed_at DESC'
   ),
   getArchivedPaginated: db.prepare(
-    'SELECT id, text, quadrant, created_at, completed_at FROM tasks WHERE user_id = ? AND completed_at IS NOT NULL ORDER BY completed_at DESC LIMIT ? OFFSET ?'
+    'SELECT id, text, quadrant, created_at, updated_at, due_at, completed_at FROM tasks WHERE user_id = ? AND completed_at IS NOT NULL ORDER BY completed_at DESC LIMIT ? OFFSET ?'
   ),
   countArchived: db.prepare(
     'SELECT COUNT(*) as total FROM tasks WHERE user_id = ? AND completed_at IS NOT NULL'
   ),
-  getById: db.prepare('SELECT id, user_id, text, quadrant, created_at, completed_at FROM tasks WHERE user_id = ? AND id = ?'),
+  getById: db.prepare('SELECT id, user_id, text, quadrant, created_at, updated_at, due_at, completed_at FROM tasks WHERE user_id = ? AND id = ?'),
   insert: db.prepare(
-    'INSERT INTO tasks (id, user_id, text, quadrant, created_at) VALUES (?, ?, ?, ?, ?)'
+    'INSERT INTO tasks (id, user_id, text, quadrant, created_at, updated_at, due_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
   ),
   updateText: db.prepare(
-    'UPDATE tasks SET text = ? WHERE user_id = ? AND id = ? AND completed_at IS NULL'
+    'UPDATE tasks SET text = ?, updated_at = ? WHERE user_id = ? AND id = ? AND completed_at IS NULL'
   ),
   updateQuadrant: db.prepare(
-    'UPDATE tasks SET quadrant = ? WHERE user_id = ? AND id = ? AND completed_at IS NULL'
+    'UPDATE tasks SET quadrant = ?, updated_at = ? WHERE user_id = ? AND id = ? AND completed_at IS NULL'
+  ),
+  updateDueAt: db.prepare(
+    'UPDATE tasks SET due_at = ?, updated_at = ? WHERE user_id = ? AND id = ? AND completed_at IS NULL'
   ),
   complete: db.prepare(
-    'UPDATE tasks SET completed_at = ? WHERE user_id = ? AND id = ? AND completed_at IS NULL'
+    'UPDATE tasks SET completed_at = ?, updated_at = ? WHERE user_id = ? AND id = ? AND completed_at IS NULL'
   ),
   deleteById: db.prepare(
     'DELETE FROM tasks WHERE user_id = ? AND id = ? AND completed_at IS NULL'
@@ -183,7 +198,7 @@ const stmts = {
     'DELETE FROM tasks WHERE user_id = ? AND id = ? AND completed_at IS NOT NULL'
   ),
   restoreArchived: db.prepare(
-    'UPDATE tasks SET completed_at = NULL WHERE user_id = ? AND id = ? AND completed_at IS NOT NULL'
+    'UPDATE tasks SET completed_at = NULL, updated_at = ? WHERE user_id = ? AND id = ? AND completed_at IS NOT NULL'
   ),
 
   // Users
@@ -290,7 +305,19 @@ export interface DbTask {
   text: string;
   quadrant: string;
   created_at: number;
+  updated_at: number;
+  due_at: number | null;
   completed_at: number | null;
+}
+
+function toTask(row: Pick<DbTask, 'id' | 'text' | 'created_at' | 'updated_at' | 'due_at'>): Task {
+  return {
+    id: row.id,
+    text: row.text,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    ...(row.due_at !== null ? { dueAt: row.due_at } : {}),
+  };
 }
 
 export interface DbUser {
@@ -643,11 +670,7 @@ export function getAllTasks(userId: string): QuadrantsState {
   for (const row of rows) {
     const quadrant = row.quadrant as QuadrantKey;
     if (result[quadrant]) {
-      result[quadrant].push({
-        id: row.id,
-        text: row.text,
-        createdAt: row.created_at,
-      });
+      result[quadrant].push(toTask(row));
     }
   }
 
@@ -658,9 +681,7 @@ export function getArchivedTasks(userId: string): ArchivedTask[] {
   const rows = stmts.getArchived.all(userId) as DbTask[];
 
   return rows.map(row => ({
-    id: row.id,
-    text: row.text,
-    createdAt: row.created_at,
+    ...toTask(row),
     completedAt: row.completed_at!,
     quadrant: row.quadrant as QuadrantKey,
   }));
@@ -716,7 +737,7 @@ export function getArchivedTasksPaginated(
 
   const rows = db
     .prepare(
-      `SELECT id, text, quadrant, created_at, completed_at
+      `SELECT id, text, quadrant, created_at, updated_at, due_at, completed_at
        FROM tasks
        WHERE ${whereSql}
        ORDER BY completed_at DESC
@@ -730,9 +751,7 @@ export function getArchivedTasksPaginated(
 
   return {
     tasks: rows.map(row => ({
-      id: row.id,
-      text: row.text,
-      createdAt: row.created_at,
+      ...toTask(row),
       completedAt: row.completed_at!,
       quadrant: row.quadrant as QuadrantKey,
     })),
@@ -744,7 +763,8 @@ export function getArchivedTasksPaginated(
 
 // Complete a task (archive it)
 export function completeTask(userId: string, id: string): boolean {
-  const result = stmts.complete.run(Date.now(), userId, id);
+  const now = Date.now();
+  const result = stmts.complete.run(now, now, userId, id);
   return result.changes > 0;
 }
 
@@ -755,25 +775,38 @@ export function deleteArchivedTask(userId: string, id: string): boolean {
 }
 
 export function restoreArchivedTask(userId: string, id: string): boolean {
-  const result = stmts.restoreArchived.run(userId, id);
+  const result = stmts.restoreArchived.run(Date.now(), userId, id);
   return result.changes > 0;
 }
 
 // Create a new task
-export function createTask(userId: string, id: string, text: string, quadrant: QuadrantKey, createdAt: number): Task {
-  stmts.insert.run(id, userId, text, quadrant, createdAt);
-  return { id, text, createdAt };
+export function createTask(
+  userId: string,
+  id: string,
+  text: string,
+  quadrant: QuadrantKey,
+  createdAt: number,
+  dueAt: number | null = null,
+): Task {
+  stmts.insert.run(id, userId, text, quadrant, createdAt, createdAt, dueAt);
+  return { id, text, createdAt, updatedAt: createdAt, ...(dueAt !== null ? { dueAt } : {}) };
 }
 
 // Update task text
 export function updateTaskText(userId: string, id: string, text: string): boolean {
-  const result = stmts.updateText.run(text, userId, id);
+  const result = stmts.updateText.run(text, Date.now(), userId, id);
   return result.changes > 0;
 }
 
 // Update task quadrant (move task)
 export function updateTaskQuadrant(userId: string, id: string, quadrant: QuadrantKey): boolean {
-  const result = stmts.updateQuadrant.run(quadrant, userId, id);
+  const result = stmts.updateQuadrant.run(quadrant, Date.now(), userId, id);
+  return result.changes > 0;
+}
+
+// Set or clear (null) a task due date
+export function updateTaskDueAt(userId: string, id: string, dueAt: number | null): boolean {
+  const result = stmts.updateDueAt.run(dueAt, Date.now(), userId, id);
   return result.changes > 0;
 }
 

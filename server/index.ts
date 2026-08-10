@@ -11,6 +11,7 @@ import db, {
   createTask,
   updateTaskText,
   updateTaskQuadrant,
+  updateTaskDueAt,
   deleteTask,
   completeTask,
   getArchivedTasksPaginated,
@@ -855,7 +856,7 @@ app.post('/api/tasks', mutationLimiter, requireAuth, validateCsrf, (req: Request
 
     const id = randomUUID();
     const createdAt = Date.now();
-    const task = createTask(req.auth!.userId, id, sanitizedText, parsed.data.quadrant, createdAt);
+    const task = createTask(req.auth!.userId, id, sanitizedText, parsed.data.quadrant, createdAt, parsed.data.dueAt ?? null);
 
     res.status(201).json(task);
   } catch (err) {
@@ -878,7 +879,7 @@ app.patch('/api/tasks/:id', mutationLimiter, requireAuth, validateCsrf, (req: Re
       return;
     }
 
-    const { text, quadrant } = parsed.data;
+    const { text, quadrant, dueAt } = parsed.data;
 
     const updateTask = db.transaction(() => {
       if (text !== undefined) {
@@ -894,6 +895,13 @@ app.patch('/api/tasks/:id', mutationLimiter, requireAuth, validateCsrf, (req: Re
 
       if (quadrant !== undefined) {
         const updated = updateTaskQuadrant(req.auth!.userId, id, quadrant);
+        if (!updated) {
+          return { error: 'Task not found', status: 404 };
+        }
+      }
+
+      if (dueAt !== undefined) {
+        const updated = updateTaskDueAt(req.auth!.userId, id, dueAt);
         if (!updated) {
           return { error: 'Task not found', status: 404 };
         }
@@ -992,6 +1000,14 @@ app.post('/api/tasks/batch', mutationLimiter, requireAuth, validateCsrf, (req: R
         if (op.type === 'delete') {
           const deleted = deleteTask(req.auth!.userId, op.id);
           if (!deleted) {
+            return { status: 404, error: `Task not found: ${op.id}` };
+          }
+          continue;
+        }
+
+        if (op.type === 'due') {
+          const updated = updateTaskDueAt(req.auth!.userId, op.id, op.dueAt);
+          if (!updated) {
             return { status: 404, error: `Task not found: ${op.id}` };
           }
           continue;

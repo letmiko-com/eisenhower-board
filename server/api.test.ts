@@ -391,6 +391,130 @@ describe('API: email change notification', () => {
   });
 });
 
+describe('API: due dates', () => {
+  it('creates a task with a due date and returns it in the board payload', async () => {
+    const client = await signInWithCsrf('due-create@example.com');
+    const dueAt = Date.now() + 24 * 60 * 60 * 1000;
+
+    const created = await request(app)
+      .post('/api/tasks')
+      .set('X-Forwarded-For', nextIp())
+      .set('Cookie', client.cookies)
+      .set('X-CSRF-Token', client.token)
+      .send({ text: 'due soon', quadrant: 'urgentImportant', dueAt });
+    expect(created.status).toBe(201);
+    expect(created.body.dueAt).toBe(dueAt);
+    expect(created.body.updatedAt).toBe(created.body.createdAt);
+
+    const board = await request(app)
+      .get('/api/tasks')
+      .set('X-Forwarded-For', nextIp())
+      .set('Cookie', client.cookies);
+    expect(board.status).toBe(200);
+    const task = board.body.urgentImportant.find((t: { id: string }) => t.id === created.body.id);
+    expect(task.dueAt).toBe(dueAt);
+    expect(task.updatedAt).toBeGreaterThan(0);
+  });
+
+  it('sets and clears a due date via PATCH, bumping updatedAt', async () => {
+    const client = await signInWithCsrf('due-patch@example.com');
+    const id = await createTaskFor(client, 'no due yet');
+    const dueAt = Date.now() + 60 * 60 * 1000;
+
+    const set = await request(app)
+      .patch(`/api/tasks/${id}`)
+      .set('X-Forwarded-For', nextIp())
+      .set('Cookie', client.cookies)
+      .set('X-CSRF-Token', client.token)
+      .send({ dueAt });
+    expect(set.status).toBe(200);
+
+    let board = await request(app)
+      .get('/api/tasks')
+      .set('X-Forwarded-For', nextIp())
+      .set('Cookie', client.cookies);
+    let task = board.body.urgentImportant.find((t: { id: string }) => t.id === id);
+    expect(task.dueAt).toBe(dueAt);
+    const updatedAfterSet = task.updatedAt as number;
+    expect(updatedAfterSet).toBeGreaterThanOrEqual(task.createdAt);
+
+    const clear = await request(app)
+      .patch(`/api/tasks/${id}`)
+      .set('X-Forwarded-For', nextIp())
+      .set('Cookie', client.cookies)
+      .set('X-CSRF-Token', client.token)
+      .send({ dueAt: null });
+    expect(clear.status).toBe(200);
+
+    board = await request(app)
+      .get('/api/tasks')
+      .set('X-Forwarded-For', nextIp())
+      .set('Cookie', client.cookies);
+    task = board.body.urgentImportant.find((t: { id: string }) => t.id === id);
+    expect(task.dueAt).toBeUndefined();
+    expect(task.updatedAt).toBeGreaterThanOrEqual(updatedAfterSet);
+  });
+
+  it('rejects a non-positive due date', async () => {
+    const client = await signInWithCsrf('due-invalid@example.com');
+    const res = await request(app)
+      .post('/api/tasks')
+      .set('X-Forwarded-For', nextIp())
+      .set('Cookie', client.cookies)
+      .set('X-CSRF-Token', client.token)
+      .send({ text: 'bad due', quadrant: 'urgentImportant', dueAt: -5 });
+    expect(res.status).toBe(400);
+  });
+
+  it('applies due batch operations', async () => {
+    const client = await signInWithCsrf('due-batch@example.com');
+    const id = await createTaskFor(client, 'batch due');
+    const dueAt = Date.now() + 2 * 60 * 60 * 1000;
+
+    const res = await request(app)
+      .post('/api/tasks/batch')
+      .set('X-Forwarded-For', nextIp())
+      .set('Cookie', client.cookies)
+      .set('X-CSRF-Token', client.token)
+      .send({ operations: [{ type: 'due', id, dueAt }] });
+    expect(res.status).toBe(200);
+
+    const board = await request(app)
+      .get('/api/tasks')
+      .set('X-Forwarded-For', nextIp())
+      .set('Cookie', client.cookies);
+    const task = board.body.urgentImportant.find((t: { id: string }) => t.id === id);
+    expect(task.dueAt).toBe(dueAt);
+  });
+
+  it('keeps the due date through archive and restore', async () => {
+    const client = await signInWithCsrf('due-archive@example.com');
+    const dueAt = Date.now() + 3 * 60 * 60 * 1000;
+    const created = await request(app)
+      .post('/api/tasks')
+      .set('X-Forwarded-For', nextIp())
+      .set('Cookie', client.cookies)
+      .set('X-CSRF-Token', client.token)
+      .send({ text: 'due archived', quadrant: 'notUrgentImportant', dueAt });
+    const id = created.body.id as string;
+
+    await request(app)
+      .post(`/api/tasks/${id}/complete`)
+      .set('X-Forwarded-For', nextIp())
+      .set('Cookie', client.cookies)
+      .set('X-CSRF-Token', client.token)
+      .expect(200);
+
+    const archived = await request(app)
+      .get('/api/archived-tasks')
+      .set('X-Forwarded-For', nextIp())
+      .set('Cookie', client.cookies);
+    expect(archived.status).toBe(200);
+    const archivedTask = archived.body.tasks.find((t: { id: string }) => t.id === id);
+    expect(archivedTask.dueAt).toBe(dueAt);
+  });
+});
+
 describe('API: admin guard', () => {
   it('returns 403 for a non-admin user', async () => {
     const sessionCookie = await signIn('plain-user@example.com');

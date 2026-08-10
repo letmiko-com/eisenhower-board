@@ -11,7 +11,12 @@ export const TaskSchema = z.object({
   id: z.string(),
   text: z.string(),
   createdAt: z.number(),
+  updatedAt: z.number().optional(),
+  dueAt: z.number().optional(),
 });
+
+// Epoch milliseconds; null clears the due date
+export const DueAtSchema = z.number().int().positive();
 
 export const QuadrantsStateSchema = z.object({
   urgentImportant: z.array(TaskSchema),
@@ -23,13 +28,15 @@ export const QuadrantsStateSchema = z.object({
 export const CreateTaskRequestSchema = z.object({
   text: z.string().min(1, 'Text is required').max(500, 'Text too long'),
   quadrant: QuadrantKeySchema,
+  dueAt: DueAtSchema.nullable().optional(),
 });
 
 export const UpdateTaskRequestSchema = z.object({
   text: z.string().min(1, 'Text cannot be empty').max(500, 'Text too long').optional(),
   quadrant: QuadrantKeySchema.optional(),
+  dueAt: DueAtSchema.nullable().optional(),
 }).refine(
-  (data) => data.text !== undefined || data.quadrant !== undefined,
+  (data) => data.text !== undefined || data.quadrant !== undefined || data.dueAt !== undefined,
   { message: 'At least one field must be provided' }
 );
 
@@ -71,11 +78,18 @@ const TaskCompleteBatchOperationSchema = z.object({
   id: TaskIdSchema,
 });
 
+const TaskDueBatchOperationSchema = z.object({
+  type: z.literal('due'),
+  id: TaskIdSchema,
+  dueAt: DueAtSchema.nullable(),
+});
+
 export const TaskBatchOperationSchema = z.discriminatedUnion('type', [
   TaskMoveBatchOperationSchema,
   TaskEditBatchOperationSchema,
   TaskDeleteBatchOperationSchema,
   TaskCompleteBatchOperationSchema,
+  TaskDueBatchOperationSchema,
 ]);
 
 export const TaskBatchRequestSchema = z.object({

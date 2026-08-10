@@ -8,6 +8,10 @@ export interface Task {
   id: string;
   text: string;
   createdAt: number;
+  // Optional for backwards compatibility with tasks created before the column
+  // existed in client-side state; the server always sends it.
+  updatedAt?: number;
+  dueAt?: number;
   completedAt?: number;
 }
 
@@ -21,11 +25,13 @@ export type QuadrantsState = Record<QuadrantKey, Task[]>;
 export interface CreateTaskRequest {
   text: string;
   quadrant: QuadrantKey;
+  dueAt?: number | null;
 }
 
 export interface UpdateTaskRequest {
   text?: string;
   quadrant?: QuadrantKey;
+  dueAt?: number | null;
 }
 
 export interface MoveTaskBatchOperation {
@@ -50,11 +56,18 @@ export interface CompleteTaskBatchOperation {
   id: string;
 }
 
+export interface DueTaskBatchOperation {
+  type: 'due';
+  id: string;
+  dueAt: number | null;
+}
+
 export type TaskBatchOperation =
   | MoveTaskBatchOperation
   | EditTaskBatchOperation
   | DeleteTaskBatchOperation
-  | CompleteTaskBatchOperation;
+  | CompleteTaskBatchOperation
+  | DueTaskBatchOperation;
 
 export interface TaskBatchRequest {
   operations: TaskBatchOperation[];
