@@ -31,6 +31,7 @@ process.env.DATA_DIR = mkdtempSync(path.join(tmpdir(), 'eisenhower-api-test-'));
 process.env.APP_BASE_URL = APP_ORIGIN;
 process.env.TRUST_PROXY = '1';
 process.env.ADMIN_EMAILS = 'admin@example.com';
+process.env.APPLE_APP_ID = 'TEAM123456.com.example.focus';
 
 let app: Express;
 
@@ -388,6 +389,113 @@ describe('API: email change notification', () => {
     expect(consume.headers.location).toBe('/?email-changed=true');
 
     expect(mailbox.notices).toContainEqual({ to: 'old-address@example.com' });
+  });
+});
+
+async function signInNative(email: string): Promise<string> {
+  const token = tokenFromLink(await requestMagicLink(email));
+  const res = await request(app)
+    .post('/api/auth/native/consume')
+    .set('X-Forwarded-For', nextIp())
+    .send({ token });
+  expect(res.status).toBe(201);
+  return res.body.token as string;
+}
+
+describe('API: native (Bearer) authentication', () => {
+  it('consumes a magic link as JSON without setting any cookie', async () => {
+    const token = tokenFromLink(await requestMagicLink('native-flow@example.com'));
+    const res = await request(app)
+      .post('/api/auth/native/consume')
+      .set('X-Forwarded-For', nextIp())
+      .send({ token });
+    expect(res.status).toBe(201);
+    expect(typeof res.body.token).toBe('string');
+    expect(res.body.expiresAt).toBeGreaterThan(Date.now());
+    expect(res.body.absoluteExpiresAt).toBeGreaterThan(res.body.expiresAt);
+    expect(res.body.user.email).toBe('native-flow@example.com');
+    expect(getSetCookies(res)).toEqual([]);
+  });
+
+  it('rejects reuse of a natively consumed magic-link token', async () => {
+    const token = tokenFromLink(await requestMagicLink('native-reuse@example.com'));
+    await request(app)
+      .post('/api/auth/native/consume')
+      .set('X-Forwarded-For', nextIp())
+      .send({ token })
+      .expect(201);
+    const again = await request(app)
+      .post('/api/auth/native/consume')
+      .set('X-Forwarded-For', nextIp())
+      .send({ token });
+    expect(again.status).toBe(401);
+  });
+
+  it('authenticates reads and mutations with a Bearer token, without CSRF', async () => {
+    const bearer = await signInNative('native-crud@example.com');
+
+    const created = await request(app)
+      .post('/api/tasks')
+      .set('X-Forwarded-For', nextIp())
+      .set('Authorization', `Bearer ${bearer}`)
+      .send({ text: 'from the app', quadrant: 'notUrgentImportant', dueAt: Date.now() + 3600_000 });
+    expect(created.status).toBe(201);
+
+    const board = await request(app)
+      .get('/api/tasks')
+      .set('X-Forwarded-For', nextIp())
+      .set('Authorization', `Bearer ${bearer}`);
+    expect(board.status).toBe(200);
+    expect(JSON.stringify(board.body)).toContain('from the app');
+    // Bearer responses never re-issue cookies
+    expect(getSetCookies(board)).toEqual([]);
+  });
+
+  it('rejects an invalid Bearer token and never falls back to cookies', async () => {
+    const sessionCookie = await signIn('native-nofallback@example.com');
+    const res = await request(app)
+      .get('/api/tasks')
+      .set('X-Forwarded-For', nextIp())
+      .set('Cookie', sessionCookie)
+      .set('Authorization', 'Bearer definitely-not-a-session-token-000000');
+    expect(res.status).toBe(401);
+  });
+
+  it('logs out a Bearer session', async () => {
+    const bearer = await signInNative('native-logout@example.com');
+    await request(app)
+      .post('/api/auth/logout')
+      .set('X-Forwarded-For', nextIp())
+      .set('Authorization', `Bearer ${bearer}`)
+      .expect(200);
+    const after = await request(app)
+      .get('/api/tasks')
+      .set('X-Forwarded-For', nextIp())
+      .set('Authorization', `Bearer ${bearer}`);
+    expect(after.status).toBe(401);
+  });
+
+  it('still enforces CSRF for cookie-authenticated mutations', async () => {
+    const sessionCookie = await signIn('native-csrf-still@example.com');
+    const res = await request(app)
+      .post('/api/tasks')
+      .set('X-Forwarded-For', nextIp())
+      .set('Cookie', sessionCookie)
+      .send({ text: 'cookie without csrf', quadrant: 'urgentImportant' });
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('CSRF');
+  });
+});
+
+describe('API: apple-app-site-association', () => {
+  it('serves the applinks declaration for the configured app', async () => {
+    const res = await request(app)
+      .get('/.well-known/apple-app-site-association')
+      .set('X-Forwarded-For', nextIp());
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toContain('application/json');
+    expect(res.body.applinks.details[0].appIDs).toEqual(['TEAM123456.com.example.focus']);
+    expect(res.body.applinks.details[0].components[0]['/']).toBe('/api/auth/verify');
   });
 });
 

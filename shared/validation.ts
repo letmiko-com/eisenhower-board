@@ -45,6 +45,11 @@ export const MagicLinkRequestSchema = z.object({
   language: z.string().min(2).max(5).optional(),
 });
 
+// Magic-link token consumed by the native (non-browser) client
+export const NativeConsumeRequestSchema = z.object({
+  token: z.string().min(20).max(200),
+});
+
 export const TaskIdSchema = z.string().uuid('Invalid task ID');
 
 export const UserIdSchema = z.string().uuid('Invalid user ID');

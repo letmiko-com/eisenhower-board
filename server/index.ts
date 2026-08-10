@@ -45,6 +45,7 @@ import {
   TaskIdSchema,
   UserIdSchema,
   MagicLinkRequestSchema,
+  NativeConsumeRequestSchema,
   ChangeEmailRequestSchema,
   SessionIdSchema,
   TaskBatchRequestSchema,
@@ -221,6 +222,9 @@ declare global {
   namespace Express {
     interface Request {
       auth?: AuthContext;
+      // How the session was presented: cookies (browser) or an Authorization
+      // Bearer header (native app). Drives CSRF enforcement.
+      authVia?: 'cookie' | 'bearer';
     }
   }
 }
@@ -327,7 +331,44 @@ function escapeHtml(value: string): string {
     .replace(/'/g, '&#39;');
 }
 
+// Shared session resolution for both cookie and Bearer transports: validates
+// the token, enforces the absolute lifetime, and slides the expiry.
+function resolveSession(rawSessionToken: string, now: number): ReturnType<typeof getSessionByHash> {
+  const sessionHash = hashToken(rawSessionToken);
+  const session = getSessionByHash(sessionHash, now);
+  if (!session) {
+    deleteSessionByHash(sessionHash);
+    return null;
+  }
+
+  if (now - session.createdAt > SESSION_ABSOLUTE_TTL_MS) {
+    deleteSessionById(session.sessionId);
+    return null;
+  }
+
+  touchSession(session.sessionId, now, now + SESSION_TTL_MS);
+  return session;
+}
+
 function authenticateSession(req: Request, res: Response, next: NextFunction): void {
+  const authorization = req.headers.authorization;
+  if (authorization?.startsWith('Bearer ')) {
+    const rawSessionToken = authorization.slice('Bearer '.length).trim();
+    const session = rawSessionToken ? resolveSession(rawSessionToken, Date.now()) : null;
+    if (session) {
+      req.auth = {
+        sessionId: session.sessionId,
+        userId: session.userId,
+        email: session.email,
+      };
+      req.authVia = 'bearer';
+    }
+    // A request that presents a Bearer header never falls back to cookies:
+    // mixing transports would let a stale cookie mask an expired app session.
+    next();
+    return;
+  }
+
   const cookies = parseCookies(req.headers.cookie);
   const rawSessionToken = cookies[SESSION_COOKIE_NAME];
   if (!rawSessionToken) {
@@ -335,25 +376,13 @@ function authenticateSession(req: Request, res: Response, next: NextFunction): v
     return;
   }
 
-  const sessionHash = hashToken(rawSessionToken);
   const now = Date.now();
-  const session = getSessionByHash(sessionHash, now);
+  const session = resolveSession(rawSessionToken, now);
   if (!session) {
-    deleteSessionByHash(sessionHash);
     clearAuthCookies(res);
     next();
     return;
   }
-
-  if (now - session.createdAt > SESSION_ABSOLUTE_TTL_MS) {
-    deleteSessionById(session.sessionId);
-    clearAuthCookies(res);
-    next();
-    return;
-  }
-
-  const refreshedExpiry = now + SESSION_TTL_MS;
-  touchSession(session.sessionId, now, refreshedExpiry);
   // Re-issue the session cookie so its maxAge follows the sliding server-side
   // expiry, capped by the absolute session lifetime
   res.cookie(SESSION_COOKIE_NAME, rawSessionToken, {
@@ -368,6 +397,7 @@ function authenticateSession(req: Request, res: Response, next: NextFunction): v
     userId: session.userId,
     email: session.email,
   };
+  req.authVia = 'cookie';
   next();
 }
 
@@ -388,6 +418,14 @@ function requireAdmin(req: Request, res: Response, next: NextFunction): void {
 }
 
 function validateCsrf(req: Request, res: Response, next: NextFunction): void {
+  // CSRF forges requests that ride on ambient credentials (cookies). A Bearer
+  // header cannot be set by a cross-site page, so token-authenticated
+  // requests carry no CSRF risk and skip the double-submit check.
+  if (req.authVia === 'bearer') {
+    next();
+    return;
+  }
+
   const header = req.headers['x-csrf-token'];
   const csrfHeader = Array.isArray(header) ? header[0] : header;
   const cookies = parseCookies(req.headers.cookie);
@@ -555,6 +593,26 @@ app.get('/api/health', readLimiter, (_req: Request, res: Response) => {
   res.json({ status: 'ok' });
 });
 
+// Apple universal links: lets the iOS app claim magic-link URLs so the mail
+// opens the app instead of the browser interstitial. 404 when APPLE_APP_ID
+// (TEAMID.bundle.id) is unset, keeping web-only deployments unchanged.
+app.get('/.well-known/apple-app-site-association', (_req: Request, res: Response) => {
+  const appId = process.env.APPLE_APP_ID?.trim();
+  if (!appId) {
+    res.status(404).json({ error: 'Not found' });
+    return;
+  }
+  res.setHeader('Cache-Control', 'public, max-age=3600');
+  res.type('application/json').send(JSON.stringify({
+    applinks: {
+      details: [{
+        appIDs: [appId],
+        components: [{ '/': '/api/auth/verify', '?': { token: '?*' } }],
+      }],
+    },
+  }));
+});
+
 app.post('/api/auth/magic-link', magicLinkIpLimiter, magicLinkEmailLimiter, magicLinkEmailOnlyLimiter, async (req: Request, res: Response) => {
   const genericResponse = { success: true };
 
@@ -716,6 +774,52 @@ app.post('/api/auth/verify/consume', verifyLimiter, requireTrustedOrigin, (req: 
   } catch (err) {
     console.error('POST /api/auth/verify/consume error:', err);
     res.redirect('/?auth=invalid');
+  }
+});
+
+// Native-client variant of magic-link consumption: returns the raw session
+// token as JSON (stored in the iOS Keychain) instead of setting cookies.
+// No Origin check: the one-time token is the secret, and since no cookie is
+// ever set, a cross-site POST cannot log a victim's browser into an account.
+app.post('/api/auth/native/consume', verifyLimiter, (req: Request, res: Response) => {
+  try {
+    const parsed = NativeConsumeRequestSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'Invalid request' });
+      return;
+    }
+
+    const now = Date.now();
+    const consumed = consumeMagicLink(hashToken(parsed.data.token), now);
+    if (!consumed) {
+      logSecurityEvent('magic_link_consume_failed_invalid_or_expired', {
+        ip: req.ip ?? null,
+        client: 'native',
+      });
+      res.status(401).json({ error: 'Invalid or expired sign-in link' });
+      return;
+    }
+
+    const rawSessionToken = randomBytes(32).toString('base64url');
+    createSession({
+      sessionId: randomUUID(),
+      userId: consumed.userId,
+      sessionHash: hashToken(rawSessionToken),
+      expiresAt: now + SESSION_TTL_MS,
+      createdAt: now,
+      ip: req.ip || null,
+      userAgent: req.get('user-agent') || null,
+    });
+
+    res.status(201).json({
+      token: rawSessionToken,
+      expiresAt: now + SESSION_TTL_MS,
+      absoluteExpiresAt: now + SESSION_ABSOLUTE_TTL_MS,
+      user: { email: consumed.email },
+    });
+  } catch (err) {
+    console.error('POST /api/auth/native/consume error:', err);
+    res.status(500).json({ error: 'Failed to sign in' });
   }
 });
 
